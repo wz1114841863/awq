@@ -12,6 +12,7 @@ LM_HEAD_KEYWORDS = ["lm_head", "embed_out", "output"]
 
 
 def scale_activations(module):
+    """ 获取激活函数并替换为ScaledActivation """
     param = next(module.parameters())
     dtype = param.dtype
     device = param.device
@@ -57,22 +58,22 @@ def scale_activations(module):
         set_op_by_name(module, "mlp.act", act)
 
 
-# core quantization method (simulated quantization)
 def pseudo_quantize_tensor(
     w, n_bit=8, zero_point=True, q_group_size=-1, inplace=False, get_scale_zp=False
 ):
-    org_w_shape = w.shape
-    if q_group_size > 0:
+    """ 模拟量化, 将浮点张量 w 限制在低比特位表示范围内(如 8-bit). 模拟硬件量化对模型精度的影响. """
+    org_w_shape = w.shape  # [768,768]
+    if q_group_size > 0:  # 分组量化
         assert org_w_shape[-1] % q_group_size == 0
         w = w.reshape(-1, q_group_size)
-    assert w.dim() == 2
-    if zero_point:
-        max_val = w.amax(dim=1, keepdim=True)
-        min_val = w.amin(dim=1, keepdim=True)
+    assert w.dim() == 2  # [4608, 128]
+    if zero_point:  # 非对称量化, min_val->min_int
+        max_val = w.amax(dim=1, keepdim=True)  # [4608, 1]
+        min_val = w.amin(dim=1, keepdim=True)  # [4608, 1]
         max_int = 2**n_bit - 1
         min_int = 0
-        scales = (max_val - min_val).clamp(min=1e-5) / max_int
-        zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+        scales = (max_val - min_val).clamp(min=1e-5) / max_int  # 浮点区间 [min_val, max_val] 映射到 [min_int, max_int]
+        zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)  # round(min_val/sacle​)+zero_point=min_int, 且min_int = 0.
     else:  # we actually never used this
         assert min_val is None
         max_val = w.abs().amax(dim=1, keepdim=True)
@@ -89,10 +90,10 @@ def pseudo_quantize_tensor(
         (
             (w.div_(scales).round_().add_(zeros)).clamp_(min_int, max_int).sub_(zeros)
         ).mul_(scales)
-    else:
-        w = (
+    else:  # 量化与反量化
+        w = (  # q = round(w / scales) + zero
             torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros
-        ) * scales
+        ) * scales  # w = (q - zeros) * scales
     assert torch.isnan(w).sum() == 0
 
     w = w.reshape(org_w_shape)
@@ -124,6 +125,7 @@ def pseudo_quantize_model_weight(
 
 @torch.no_grad()
 def real_quantize_model_weight(model, w_bit, q_config, init_only=False):
+    """ 对模型的权重进行真实量化 """
     from .qmodule import WQLinear
     from .pre_quant import get_blocks, get_named_linears
 

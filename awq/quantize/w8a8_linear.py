@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 
 class W8A8OF16LinearStaticScale(torch.nn.Module):
+    """ 实现一个支持 W8A8线性层, 同时提供可配置的反量化 """
     def __init__(
         self,
         in_features: int,
@@ -25,6 +26,8 @@ class W8A8OF16LinearStaticScale(torch.nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         # size [1] or size [oc]
+        # 在 PyTorch 中, 缓冲区是模型的一部分, 会随着模型保存和加载, 但不会参与梯度计算.
+        # 用于反量化, 存储缩放因子float16.
         self.register_buffer(
             "dequant_scale", torch.ones(out_features, dtype=torch.half)
         )
@@ -43,6 +46,7 @@ class W8A8OF16LinearStaticScale(torch.nn.Module):
             self.register_parameter("bias", None)
 
     def create_weights(self) -> None:
+        """ 创建权重缓存区, 类型为int8 """
         self.register_buffer(
             "weight",
             torch.empty(
@@ -58,6 +62,7 @@ class W8A8OF16LinearStaticScale(torch.nn.Module):
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        """ 抽象方法,定义了如何将权重应用到输入张量上. """
         raise NotImplementedError
 
     def forward(self, input_):
@@ -170,6 +175,7 @@ class W8A8OF16LinearDynamicInputScale(W8A8OF16LinearStaticScale):
         init_only=False,
         s1_scale=None,
     ):
+        """ 从 Q/K/V 三个线性层创建一个量化线性层 """
         q_linear = cls(
             q.in_features,
             q.out_features + k.out_features + v.out_features,
@@ -208,6 +214,7 @@ class W8A8OF16LinearDynamicInputScale(W8A8OF16LinearStaticScale):
 
 
 class FakeW8A8Linear(torch.nn.Module):
+    """ 实现一个伪量化线性层,用于模拟量化效果. """
     def __init__(
         self, in_features: int, out_features: int, bias: bool = True, wbit: int = 8
     ):

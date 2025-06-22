@@ -3,12 +3,14 @@ import accelerate
 
 
 def get_module_by_name_suffix(model, module_name: str):
+    """ 根据模块名称的后缀从模型中获取模块 """
     for name, module in model.named_modules():
         if name.endswith(module_name):
             return module
 
 
 def simple_dispatch_model(model, device_map):
+    """ 将模型分发到不同的设备上运行 """
     from accelerate.hooks import add_hook_to_module, AlignDevicesHook
 
     if "" in device_map:

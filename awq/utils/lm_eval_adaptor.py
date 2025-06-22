@@ -5,6 +5,7 @@ import fnmatch
 
 
 class LMEvalAdaptor(BaseLM):
+    """ 语言模型评估适配器 """
     def __init__(self, model_name, model, tokenizer, batch_size=1, max_length=-1):
         super().__init__()
 

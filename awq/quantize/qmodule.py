@@ -5,10 +5,12 @@ import awq_inference_engine  # with CUDA kernels
 
 
 def make_divisible(c, divisor):
+    """将一个数调整为可以被某个除数整除的最小整数."""
     return (c + divisor - 1) // divisor
 
 
 def calculate_zeros_width(in_features, group_size=128, pack_num=8):
+    """根据输入特征维度 in_features 和分组大小 group_size,计算零值填充的宽度."""
     if group_size >= 128:
         size_multiplier = 1
     elif group_size == 64:
@@ -24,6 +26,17 @@ def calculate_zeros_width(in_features, group_size=128, pack_num=8):
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
+    """将未打包的量化权重(unpacked_qweight)打包为特定格式
+        优化硬件计算效率和存储效率.
+    交错存储:
+        每4行权重交错排列,匹配GPU内存访问模式
+    位压缩:
+        4个4-bit数值打包为1个INT16
+    参数:
+        unpacked_qweight:未打包的量化权重,形状为 [N, K].
+        interleave:交错参数,用于控制权重的交错排列.
+        kstride:步长参数,用于控制权重的步长排列.
+    """
     # unpacked_qweight: [N, K]
     N = unpacked_qweight.shape[0]
     K = unpacked_qweight.shape[1]
@@ -49,6 +62,7 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
         N // interleave, K // kstride, kstride, interleave
     )
     # Packing -> (N // 4, K // 64, 64)
+    # 将权重打包为 int16 格式.
     Packed_Kernel = (
         Packed_Kernel[..., 0]
         | (Packed_Kernel[..., 1] << 4)
@@ -66,6 +80,8 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
 
 
 class ScaledActivation(nn.Module):
+    """对激活值进行缩放"""
+
     def __init__(self, module, scales):
         super().__init__()
         self.act = module
@@ -76,10 +92,13 @@ class ScaledActivation(nn.Module):
 
 
 class WQLinear(nn.Module):
+    """实现量化线性层, 替换原始 nn.Linear"""
+
     def __init__(self, w_bit, group_size, in_features, out_features, bias, dev):
         super().__init__()
 
         if w_bit not in [4]:
+            # 是不是一个可以研究的点, 4bit有利于打包可能是
             raise NotImplementedError("Only 4-bit are supported for now.")
 
         self.in_features = in_features
@@ -89,14 +108,14 @@ class WQLinear(nn.Module):
         self.split_k_iters = 8
         self.interleave = 4
         # quick sanity check (make sure aligment)
-        assert self.in_features % self.group_size == 0
-        assert out_features % (32 // self.w_bit) == 0
+        assert self.in_features % self.group_size == 0  # 输入维度需能被分组大小整除
+        assert out_features % (32 // self.w_bit) == 0  # 输出维度需对齐硬件(8的倍数)
         pack_num = 32 // self.w_bit
         int16_pack_num = 16 // self.w_bit
-
+        # NVIDIA GPU的Tensor Core要求矩阵宽度为8的倍数
         assert out_features % (self.interleave) == 0
         self.register_buffer(
-            "qweight",
+            "qweight",  # 存储量化后的权重, 使用 INT16 存储4-bit数据,实现4x压缩
             torch.zeros(
                 (
                     out_features // self.interleave,
@@ -106,8 +125,9 @@ class WQLinear(nn.Module):
                 device=dev,
             ),
         )
+        # scales 和 scaled_zeros 按分组存储,额外内存占比<0.5%
         self.register_buffer(
-            "scales",
+            "scales",  # 存储缩放因子
             torch.zeros(
                 (
                     calculate_zeros_width(in_features, self.group_size) * pack_num,
@@ -118,7 +138,7 @@ class WQLinear(nn.Module):
             ),
         )
         self.register_buffer(
-            "scaled_zeros",
+            "scaled_zeros",  # 存储缩放后的零值
             torch.zeros(
                 (
                     calculate_zeros_width(in_features, self.group_size) * pack_num,
@@ -131,7 +151,8 @@ class WQLinear(nn.Module):
 
         if bias:
             self.register_buffer(
-                "bias", torch.zeros((out_features), dtype=torch.float16, device=dev)
+                "bias",  # 存储偏置
+                torch.zeros((out_features), dtype=torch.float16, device=dev),
             )
         else:
             self.bias = None
@@ -152,10 +173,13 @@ class WQLinear(nn.Module):
             return awq_linear
 
         # need scales and zeros info for real quantization
-        assert scales is not None and zeros is not None
+        assert scales is not None and zeros is not None  # shape: [768, 6]
         scale_zeros = zeros * scales
 
         pack_num = 32 // awq_linear.w_bit
+        # scales形状:[计算后的零值宽度*8, Out]
+        # 计算后的零值宽度 = ceil(In/group_size / 8)*8
+        # 确保每个CUDA线程块访问连续128-bit数据
         qscales = torch.zeros(
             (
                 scales.shape[0],
@@ -173,7 +197,7 @@ class WQLinear(nn.Module):
         intweight = []
         for idx in range(awq_linear.in_features):
             intweight.append(
-                torch.round(
+                torch.round(  # (weight + scale_zeros) / scales
                     (linear.weight.data[:, idx] + scale_zeros[:, idx // group_size])
                     / qscales[:, idx // group_size]
                 ).to(torch.int)[:, None]
@@ -185,13 +209,14 @@ class WQLinear(nn.Module):
             intweight.contiguous(), interleave=4, kstride=64
         )
 
+        # 计算缩放后的零值(零值量化)
         zeros = zeros.to(dtype=torch.int32)
         scaled_zeros = torch.zeros_like(qscales)
         # scaled_zeros[:, :scales.shape[1]] = -(qscales[:, :scales.shape[1]] * (zeros.to(torch.float32) - 8.0)).to(torch.float16)
         scaled_zeros[:, : scales.shape[1]] = -(
             qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
         ).to(torch.float16)
-        awq_linear.scaled_zeros = scaled_zeros.transpose(1, 0).contiguous()
+        awq_linear.scaled_zeros = scaled_zeros.transpose(1, 0).contiguous()  # 将反量化公式中的乘法提前计算
 
         return awq_linear
 
@@ -210,11 +235,11 @@ class WQLinear(nn.Module):
                 self.out_features,
                 self.in_features,
                 self.group_size,
-            )
+            )  # 小批量, 向量乘法优化
         else:
             out = awq_inference_engine.gemm_forward_cuda_new(
                 inputs, self.qweight, self.scales, self.scaled_zeros
-            )  # - 8.0 * self.scales)
+            )  # - 8.0 * self.scales) 大批量, 矩阵乘法优化
         out = out + self.bias if self.bias is not None else out
         # print(out)
         # assert 0

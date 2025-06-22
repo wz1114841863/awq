@@ -13,25 +13,38 @@ from ..utils.module import get_op_by_name, get_op_name, set_op_by_name
 
 __all__ = ["auto_scale_block", "apply_scale"]
 
+"""
+    缩放操作的核心目的是在量化或调整模型参数时,保持模型的输出不变,从而避免因数值范围变化导致的模型性能下降.
+    量化是将浮点参数(如权重和激活值)转换为低比特整数的过程, 例如将 FP32 转换为 INT8.
+    通过缩放,可以将参数的动态范围调整到量化范围内,从而减少量化误差.
+    .div_(): 放大
+    .mul_(): 缩小
+"""
+
 
 @torch.no_grad()
 def get_weight_scale(weight, q_group_size=-1):
+    """计算权重缩放因子"""
     org_shape = weight.shape
     if q_group_size > 0:
-        weight = weight.view(-1, q_group_size)
+        weight = weight.view(-1, q_group_size)  # [n_group, q_group_size]
     scale = weight.abs() / weight.abs().amax(dim=1, keepdim=True)
     scale = scale.view(org_shape)
-    scale = scale.mean(0)
+    scale = scale.mean(0)  # 对每个输出通道计算缩放因子的均值, [weight.shape[1]]
     return scale
 
 
 @torch.no_grad()
 def get_act_scale(x):
-    return x.abs().view(-1, x.shape[-1]).mean(0)
+    """计算激活值的缩放因子"""
+    return (
+        x.abs().view(-1, x.shape[-1]).mean(0)
+    )  # 展开后计算输入张量 x 最后一维(通常是特征维度)的绝对值的均值
 
 
 @torch.no_grad()
 def scale_ln_fcs(ln, fcs, scales):
+    """对LayerNorm(ln)进行缩小和全连接层(fcs)进行方法"""
     if not isinstance(fcs, list):
         fcs = [fcs]
 
@@ -53,6 +66,7 @@ def scale_ln_fcs(ln, fcs, scales):
 
 @torch.no_grad()
 def scale_fc_fc(fc1, fc2, scales):
+    """对两个全连接层(fc1 和 fc2)进行缩放和放大."""
     assert isinstance(fc1, nn.Linear)
     assert isinstance(fc2, nn.Linear)
     # assert fc1.out_features == fc2.in_features
@@ -64,7 +78,9 @@ def scale_fc_fc(fc1, fc2, scales):
     if fc1.bias is not None:
         fc1.bias.div_(scales.view(-1))
 
-    fc2.weight.mul_(scales.view(1, -1))
+    fc2.weight.mul_(
+        scales.view(1, -1)
+    )  # 数学等价性:缩放后的计算 y′ 与原计算 y 结果相同.
 
     for p in fc1.parameters():
         assert torch.isnan(p).sum() == 0
@@ -85,6 +101,9 @@ def scale_gelu_fc(gelu, fc, scales):
 
 @torch.no_grad()
 def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
+    """在量化过程中,通过搜索最佳缩放比例(scale ratio),
+    对模型的线性层(如全连接层)权重进行缩放,
+    从而优化模型的量化性能,尽量减少量化误差."""
     from .quantizer import pseudo_quantize_tensor
 
     # firstly, get the weight quantize function
@@ -107,36 +126,40 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
 
     # find the best scale ratio
     def _search_module_scale(block, linears2scale: list, x, kwargs={}):
-        # w: co, ci
-        # x: n, ci
+        """搜索某个模块的最佳缩放比例"""
+        # w: co, ci;   x: n, ci 输入
         x = x.to(next(block.parameters()).device)
         with torch.no_grad():
+            # 执行一次无梯度前向传播, 得到原始输出作为参考
             org_out = block(x, **kwargs)
             if isinstance(org_out, tuple):
                 org_out = org_out[0]
-
-        x_max = get_act_scale(x)
+        x_max = get_act_scale(x)  # x:[60, 512, 768]; x_max: [768]
 
         best_error = float("inf")
         best_ratio = -1
         best_scales = None
 
-        n_grid = 20
+        n_grid = 20  # 搜索网格大小,即在 [0, 1] 之间划分 20 个缩放比例候选值.
         history = []
-
+        # 保存模块的原始权重
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}
         for ratio in range(n_grid):
-            ratio = ratio * 1 / n_grid
-            scales = x_max.pow(ratio).clamp(min=1e-4).view(-1)
-            scales = scales / (scales.max() * scales.min()).sqrt()
+            ratio = ratio * 1 / n_grid  # 0, 1/20, ... 19/20
+            scales = (
+                x_max.pow(ratio).clamp(min=1e-4).view(-1)
+            )  # scales: [768], 为什么这样选择scales? 跟激活值绑定->激活感知量化
+            scales = scales / (scales.max() * scales.min()).sqrt()  # 归一化操作
             for fc in linears2scale:
+                # 对全连接层(fc)的权重进行正向缩放.
                 fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
+                # 对全连接层(fc)的权重进行量化和反向缩放.
                 fc.weight.data = w_quantize_func(fc.weight.data) / (scales.view(1, -1))
             out = block(x, **kwargs)
             if isinstance(out, tuple):
                 out = out[0]
 
-            loss = (
+            loss = (  # 计算量化损失
                 (org_out - out).float().pow(2).mean().item()
             )  # float prevents overflow
             history.append(loss)
@@ -167,7 +190,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
         return (
             get_op_name(module, prev_op),
             tuple([get_op_name(module, m) for m in layers]),
-            scales,
+            scales,  # 每128位权重对应的缩放因子
         )
 
     scales_list = []  # return the searched scales
@@ -447,6 +470,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
 
 
 def apply_scale(module, scales_list, input_feat_dict=None):
+    """将缩放因子应用到特定模块和对应的输入特征中"""
     for prev_op_name, layer_names, scales in scales_list:
         prev_op = get_op_by_name(module, prev_op_name)
         layers = [get_op_by_name(module, name) for name in layer_names]
@@ -456,6 +480,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
             layer.cuda()
         scales.cuda()
 
+        # 根据前一个操作的类型, 调用不同的缩放函数.
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)

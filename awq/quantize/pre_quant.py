@@ -23,6 +23,7 @@ def get_named_linears(module):
 
 
 def get_blocks(model):
+    """根据特定的模型获取对应的层"""
     if model.__class__.__name__ in ("LlamaForCausalLM", "Qwen2ForCausalLM"):
         layers = model.model.layers
     elif model.__class__.__name__ == "LlavaLlamaForCausalLM":
@@ -48,6 +49,7 @@ def get_blocks(model):
 
 
 def move_embed(model, device):
+    """根据特定的模型名称移动embed层去device"""
     if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.rotary_emb = model.model.rotary_emb.to(device)
@@ -103,12 +105,13 @@ def run_awq(
         # otherwise attention_mask will always be on cpu.
         model.transformer.bias = model.transformer.bias.to("cuda")
 
+    # 取出中间层
     layers = get_blocks(model)
-
+    # 获取校准数据集
     samples = get_calib_dataset(
         data=calib_data, tokenizer=enc, n_samples=n_samples, block_size=seqlen
     )
-    samples = torch.cat(samples, dim=0)
+    samples = torch.cat(samples, dim=0)  # [60, 512]
 
     inps = []
     layer_kwargs = {}
@@ -116,9 +119,9 @@ def run_awq(
     layers[0] = layers[0].cuda()
     move_embed(model, "cuda")
 
-    # get input and kwargs to layer 0
-    # with_kwargs is only supported in PyTorch 2.0
+    # get input and kwargs to layer 0 with_kwargs is only supported in PyTorch 2.0
     # use this Catcher hack for now
+    # 模型的输入捕获实现: 捕获传入模型的某个层的输入张量和关键字参数 (kwargs)
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -135,12 +138,13 @@ def run_awq(
         if model.__class__.__name__ == "LlavaLlamaModel":
             model.llm(samples.to(next(model.parameters()).device))
         else:
-            model(samples.to(next(model.parameters()).device))
+            tmp = samples.to(next(model.parameters()).device)
+            model(tmp)  # 这里调用tmp单纯是为了获取输入
     except ValueError:  # work with early exit
         pass
     del samples
     layers[0] = layers[0].module  # restore
-    inps = inps[0]
+    inps = inps[0]  # [60, 512, 768]
 
     layers[0] = layers[0].cpu()
     move_embed(model, "cpu")
@@ -155,16 +159,27 @@ def run_awq(
 
     # solve layer by layer
     for i in tqdm.tqdm(range(len(layers)), desc="Running AWQ..."):
-        layer = layers[i]
+        layer = layers[i]  # 这里是decoder_layer, 其中包含多个线性层
         layer = layer.cuda()
+        # q, k, v, out and fc1, fc2
         named_linears = get_named_linears(layer)
 
         # firstly, get input features of all linear layers
         def cache_input_hook(m, x, y, name, feat_dict):
+            """hook function, 会在每个线性层的前向传播时被调用
+                捕获的特征是输入到线性层的激活值, 即输入张量x
+            参数
+                m: 当前线性层模块
+                x: 传入当前线性层的输入
+                y: 当前线性层的输出
+                name: 线性层名称
+                feat_dict: 存储输入特征的字典
+            """
             x = x[0]
             x = x.detach().cpu()
             feat_dict[name].append(x)
 
+        # 当访问一个不存在的键时, defaultdict 会自动为该键创建一个空列表([])作为默认值.
         input_feat = defaultdict(list)
         handles = []
         for name in named_linears:
@@ -178,21 +193,21 @@ def run_awq(
         inps = layer(inps, **layer_kwargs)[0]
         for h in handles:
             h.remove()
-        # now solve for scaling and clipping
+        # 去掉列表, 转为tensor, 获得了每一个线性层的输入
         input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
 
         # Clear GPU memory
         torch.cuda.empty_cache()
-
+        # now solve for scaling and clipping
         if (
             auto_scale
         ):  # if it applies, we should also modify the input_feat with scales
             scales_list = auto_scale_block(
-                layer,
-                layer_kwargs,
-                w_bit=w_bit,
-                q_config=q_config,
-                input_feat=input_feat,
+                layer,  # 每一个decoder层
+                layer_kwargs,  # mask, position_id等属性
+                w_bit=w_bit, # 权重量化位数
+                q_config=q_config,  # 量化配置
+                input_feat=input_feat,  # 输入特征, 即输入到线性层的激活值
             )
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
@@ -208,6 +223,7 @@ def run_awq(
         #         print(line)
 
         if mse_range:
+            # 搜索最佳裁剪范围
             clip_list = auto_clip_block(
                 layer,
                 w_bit=w_bit,

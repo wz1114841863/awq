@@ -139,7 +139,7 @@ def get_static_decoder_layer_scales(
 
 
 def get_smooth_scale(model_path, media):
-    # Load model
+    """ Load model """
     model = llava.load(model_path, devices=[0])
     del model.llm
     del model.mm_projector

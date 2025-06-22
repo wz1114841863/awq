@@ -1,5 +1,5 @@
 def get_op_by_name(module, op_name):
-    # get the op by its name relative to the module
+    """ get the op by its name relative to the module """
     for name, m in module.named_modules():
         if name == op_name:
             return m
@@ -7,6 +7,7 @@ def get_op_by_name(module, op_name):
 
 
 def set_op_by_name(layer, name, new_module):
+    """ 根据名称设置模块中的子模块 """
     levels = name.split(".")
     if len(levels) > 1:
         mod_ = layer
@@ -21,7 +22,7 @@ def set_op_by_name(layer, name, new_module):
 
 
 def get_op_name(module, op):
-    # get the name of the op relative to the module
+    """ get the name of the op relative to the module """
     for name, m in module.named_modules():
         if m is op:
             return name
@@ -29,6 +30,7 @@ def get_op_name(module, op):
 
 
 def append_str_prefix(x, prefix):
+    """ 为字符串/元组或列表中的每个元素添加前缀. """
     if isinstance(x, str):
         return prefix + x
     elif isinstance(x, tuple):

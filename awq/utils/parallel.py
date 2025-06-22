@@ -1,9 +1,9 @@
 import os
-import torch
-import gc
 
 
 def auto_parallel(args):
+    """ 根据模型大小和设备可用性自动配置并行计算所需的 GPU 数量,
+        以及设置环境变量 CUDA_VISIBLE_DEVICES 来控制使用的 GPU """
     model_size = args.model_path.split("-")[-1]
     if model_size.endswith("m"):
         model_gb = 1

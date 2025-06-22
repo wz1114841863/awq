@@ -1,14 +1,22 @@
+# 用于对预训练语言模型进行微调后效果的评估,以便了解模型在不同自然语言处理任务上的表现.
 from lm_eval import evaluator, tasks
+
+# transformers是hugging Face 提供用于加载和使用各种预训练模型的库.
+# AutoModelForCausalLM 是一个通用接口,用于加载因果语言建模
+# AutoTokenizer自动加载与模型配套的分词器(Tokenizer),用于将文本转换为模型可理解的输入
+# AutoConfig加载模型的配置文件(如层数/隐藏维度等),用于初始化模型或检查模型结构.
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import torch
 import argparse
 import os
 import json
+
+#  Hugging Face 提供用于简化多设备(CPU/GPU/TPU)和分布式训练的库.
 from accelerate import (
-    init_empty_weights,
-    infer_auto_device_map,
-    dispatch_model,
-    load_checkpoint_in_model,
+    init_empty_weights,  # 用于初始化一个空的模型权重,减少内存占用.
+    infer_auto_device_map,  # 自动生成模型的设备分配映射,将模型的不同部分分配到不同的设备上.
+    dispatch_model,  # 在多个设备(如 GPU)之间分配模型,提高运行效率.
+    load_checkpoint_in_model,  # 加载模型的权重检查到模型中,支持分布式或部分加载.
 )
 from accelerate.utils.modeling import get_balanced_memory
 from awq.utils.parallel import auto_parallel
@@ -19,10 +27,37 @@ from awq.quantize.quantizer import (
 )
 from awq.utils.lm_eval_adaptor import LMEvalAdaptor
 from awq.utils.utils import simple_dispatch_model
+
+# datasets 库是Hugging Face提供的一个用于高效处理和使用各种数据集的工具包.
 from datasets import load_dataset
 from torch import nn
 import tqdm
 
+
+"""
+--model_path:   字符串类型,指定Hugging Face模型的路径.
+--batch_size:   整数类型,默认值为1,指定批量大小.
+--tasks:        字符串类型,默认值为None,指定任务.
+--output_path:  字符串类型,默认值为None,指定输出路径.
+--num_fewshot:  整数类型,默认值为0,指定few-shot学习的数量.
+
+--parallel:         布尔类型,启用模型并行.
+--max_memory:       字符串类型,可以接受多个参数,指定设备ID与最大内存的映射关系,例如0:10GiB 1:10GiB cpu:30GiB.
+--auto_parallel:    布尔类型,自动设置并行和批量大小.
+
+--w_bit:            整数类型,默认值为None,指定权重量化的位数.
+--q_group_size:     整数类型,默认值为-1,指定量化组的大小.
+--no_zero_point:    布尔类型,禁用零点量化.
+--q_backend:        字符串类型,默认值为"fake",选择量化的后端,可选值为"fake"或"real"
+
+--dump_quant:       字符串类型,默认值为None,保存量化后的模型.
+--dump_fake:        字符串类型,默认值为None,保存伪量化后的模型.
+--load_quant:       字符串类型,默认值为None,加载量化后的模型
+
+--run_awq:          布尔类型,执行AWQ搜索过程.
+--dump_awq:         字符串类型,默认值为None,保存AWQ搜索结果.
+--load_awq:         字符串类型,默认值为None,加载AWQ搜索结果.
+"""
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, help="path of the hf model")
 parser.add_argument("--batch_size", type=int, default=1, help="batch size")
@@ -38,6 +73,7 @@ parser.add_argument(
     nargs="*",
     help="List of device_id:max_memory pairs to be parsed into a dictionary; "
     + "Example: 0:10GiB 1:10GiB cpu:30GiB; "
+    + "得到的结果: ['0:10GiB', '1:10GiB', 'cpu:30GiB']"
     + "mode details here: "
     + "https://huggingface.co/docs/accelerate/usage_guides/big_modeling",
 )
@@ -96,6 +132,7 @@ args = parser.parse_args()
 assert (
     args.act_scale_path is not None and len(args.media_path) > 0
 ) or not args.smooth_scale
+
 vila_10_quant_mode = (
     ("llava" in args.model_path.lower() or "vila" in args.model_path.lower())
     and not args.vila_15
@@ -115,10 +152,9 @@ q_config = {
 }
 print("Quantization config:", q_config)
 
-# build model and tokenizer
-
 
 def build_model_and_enc(model_path):
+    "build model and tokenizer"
     if not os.path.exists(model_path):  # look into ssd
         raise FileNotFoundError(f"{model_path} not found!")
     print(f"* Building model {model_path}")
@@ -136,9 +172,11 @@ def build_model_and_enc(model_path):
             **{"use_cache": False},
         )
     else:
+        # 加载配置
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         # Note (Haotian): To avoid OOM after huggingface transformers 4.36.2
         config.use_cache = False
+        # 加载分词器
         if "mpt" in config.__class__.__name__.lower():
             enc = AutoTokenizer.from_pretrained(
                 config.tokenizer_name, trust_remote_code=True
@@ -148,6 +186,7 @@ def build_model_and_enc(model_path):
                 model_path, use_fast=False, trust_remote_code=True
             )
 
+    # 加载模型
     if args.load_quant:  # directly load quantized weights
         print("Loading pre-computed quantized weights...")
         with init_empty_weights():
@@ -156,7 +195,7 @@ def build_model_and_enc(model_path):
             )
         real_quantize_model_weight(
             model, w_bit=args.w_bit, q_config=q_config, init_only=True
-        )
+        )  # 初始化类, 用于加载权重
 
         model.tie_weights()
 
@@ -183,7 +222,7 @@ def build_model_and_enc(model_path):
         # Dispatch model
         model = simple_dispatch_model(model, device_map=device_map)
 
-        model.eval()
+        model.eval()  # linear层换为了WQLinear层
     else:  # fp16 to quantized
         args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
         # Init model on CPU:
@@ -212,7 +251,7 @@ def build_model_and_enc(model_path):
 
                 torch.save(awq_results, args.dump_awq)
                 print("AWQ results saved at", args.dump_awq)
-
+                # awq_results.keys(): ["scales", "clip"]
             exit(0)
 
         if args.load_awq:
@@ -286,12 +325,14 @@ def main():
             torch.save(act_scale, args.act_scale_path)
             print("Save act scales at " + str(args.act_scale_path))
             args.model_path = args.model_path + "/llm"
+
         if args.dump_awq is None and args.dump_quant is None:
             exit()
 
     if args.dump_awq and os.path.exists(args.dump_awq):
         print(f"Found existing AWQ results {args.dump_awq}, exit.")
         exit()
+
     model, enc = build_model_and_enc(args.model_path)
 
     if args.tasks is not None:
@@ -299,28 +340,35 @@ def main():
         if args.tasks == "wikitext":
             testenc = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
             testenc = enc("\n\n".join(testenc["text"]), return_tensors="pt")
-            model.seqlen = 2048
+            model.seqlen = 2048  # 上下文窗口长度(如2048),用于分块处理长文本
             testenc = testenc.input_ids.to(model.device)
-            nsamples = testenc.numel() // model.seqlen
+            nsamples = testenc.numel() // model.seqlen  # 总样本数 = 总token数 // seqlen
             model = model.eval()
             nlls = []
             for i in tqdm.tqdm(range(nsamples), desc="evaluating..."):
                 batch = testenc[:, (i * model.seqlen) : ((i + 1) * model.seqlen)].to(
                     model.device
-                )
+                )  # 按seqlen分块处理
+                # 输入token: [A, B, C, D]
+                # shift_logits: 预测[B, C, D] (基于[A, B, C])
+                # shift_labels: 真实标签[B, C, D]
                 with torch.no_grad():
-                    lm_logits = model(batch).logits
-                shift_logits = lm_logits[:, :-1, :].contiguous().float()
+                    lm_logits = model(batch).logits  # 获取模型输出的logits
+                shift_logits = (
+                    lm_logits[:, :-1, :].contiguous().float()
+                )  # 去掉最后一个token的logits
                 shift_labels = testenc[
                     :, (i * model.seqlen) : ((i + 1) * model.seqlen)
-                ][:, 1:]
+                ][
+                    :, 1:
+                ]  # 去掉第一个token的标签
                 loss_fct = nn.CrossEntropyLoss()
                 loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-                )
-                neg_log_likelihood = loss.float() * model.seqlen
-                nlls.append(neg_log_likelihood)
-
+                )  # 计算交叉熵损失
+                neg_log_likelihood = loss.float() * model.seqlen  # 当前块的NLL
+                nlls.append(neg_log_likelihood)  # 累积所有块
+            # 计算困惑度: 对所有块的NLL求和,除以总样本数和seqlen,然后取指数
             ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
             print(ppl.item())
 
