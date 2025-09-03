@@ -194,7 +194,7 @@ def run_awq(
         inps = layer(inps, **layer_kwargs)[0]
         for h in handles:
             h.remove()
-        # 去掉列表, 转为tensor, 获得了每一个线性层的输入
+        # 去掉列表, 转为tensor, 获得了每一个线性层的输入, 
         input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
 
         # Clear GPU memory

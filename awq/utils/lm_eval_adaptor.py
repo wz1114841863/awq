@@ -5,7 +5,10 @@ import fnmatch
 
 
 class LMEvalAdaptor(BaseLM):
-    """ 语言模型评估适配器 """
+    """语言模型评估适配器
+    把任何 Hugging Face Transformer 模型塞进 lm-eval-harness 框架" 的通用适配器:
+    """
+
     def __init__(self, model_name, model, tokenizer, batch_size=1, max_length=-1):
         super().__init__()
 

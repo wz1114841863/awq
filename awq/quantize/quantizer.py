@@ -65,7 +65,7 @@ def pseudo_quantize_tensor(
     org_w_shape = w.shape  # [768,768]
     if q_group_size > 0:  # 分组量化
         assert org_w_shape[-1] % q_group_size == 0
-        w = w.reshape(-1, q_group_size)
+        w = w.reshape(-1, q_group_size) # [4608, 128]
     assert w.dim() == 2  # [4608, 128]
     if zero_point:  # 非对称量化, min_val->min_int
         max_val = w.amax(dim=1, keepdim=True)  # [4608, 1]

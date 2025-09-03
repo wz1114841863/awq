@@ -36,7 +36,12 @@ def get_weight_scale(weight, q_group_size=-1):
 
 @torch.no_grad()
 def get_act_scale(x):
-    """计算激活值的缩放因子"""
+    """计算激活值在特征维度(最后一维)上的逐通道缩放因子.
+        对于输入 x 的形状 [B, S, F],返回形状为 [F] 的张量,
+    其中每个元素是该通道在整个 batch 与 sequence 维度上的
+    平均绝对激活值.
+    整个 batch 里所有 token 在每个通道上的平均绝对值
+    """
     return (
         x.abs().view(-1, x.shape[-1]).mean(0)
     )  # 展开后计算输入张量 x 最后一维(通常是特征维度)的绝对值的均值
@@ -44,7 +49,7 @@ def get_act_scale(x):
 
 @torch.no_grad()
 def scale_ln_fcs(ln, fcs, scales):
-    """对LayerNorm(ln)进行缩小和全连接层(fcs)进行方法"""
+    """对LayerNorm(ln)进行缩小和全连接层(fcs)进行放大, 等同于激活缩小, 权重放大."""
     if not isinstance(fcs, list):
         fcs = [fcs]
 
@@ -66,7 +71,7 @@ def scale_ln_fcs(ln, fcs, scales):
 
 @torch.no_grad()
 def scale_fc_fc(fc1, fc2, scales):
-    """对两个全连接层(fc1 和 fc2)进行缩放和放大."""
+    """对两个全连接层(fc1 和 fc2)进行缩放和放大, 等同于激活缩小, 权重放大."""
     assert isinstance(fc1, nn.Linear)
     assert isinstance(fc2, nn.Linear)
     # assert fc1.out_features == fc2.in_features
@@ -131,7 +136,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
         x = x.to(next(block.parameters()).device)
         with torch.no_grad():
             # 执行一次无梯度前向传播, 得到原始输出作为参考
-            org_out = block(x, **kwargs)
+            org_out = block(x, **kwargs)  # shape: [60, 512, 768]
             if isinstance(org_out, tuple):
                 org_out = org_out[0]
         x_max = get_act_scale(x)  # x:[60, 512, 768]; x_max: [768]

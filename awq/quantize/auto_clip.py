@@ -11,7 +11,7 @@ __all__ = ["auto_clip_block"]
 def auto_clip_layer(
     w, input_feat, n_bit, q_config, n_grid=20, max_shrink=0.5, n_sample_token=512
 ):
-    """ 对单个线性层的权重进行自动裁剪
+    """对单个线性层的权重进行自动裁剪
     通过迭代搜索最佳的最大值(max_val), 使得量化后的权重与原始权重的输出误差最小.
     参数:
         w: 模型权重.
@@ -42,6 +42,7 @@ def auto_clip_layer(
     best_max_val_all = []
 
     for i_b in range(w.shape[0] // oc_batch_size):
+        # 分批处理权重,防止显存溢出.
         w = w_all[i_b * oc_batch_size : (i_b + 1) * oc_batch_size]
 
         org_max_val = w.abs().amax(dim=-1, keepdim=True)  # co, 1, n_group, 1
@@ -53,13 +54,17 @@ def auto_clip_layer(
         org_out = (input_feat * w).sum(dim=-1)  # co, n_token, n_group
 
         for i_s in range(int(max_shrink * n_grid)):
-            max_val = org_max_val * (1 - i_s / n_grid)
+            max_val = org_max_val * (1 - i_s / n_grid)  # 线性降低阈值
             min_val = -max_val
-            cur_w = torch.clamp(w, min_val, max_val)
-            q_w = pseudo_quantize_tensor(cur_w, n_bit=n_bit, **q_config)
-            cur_out = (input_feat * q_w).sum(dim=-1)
+            cur_w = torch.clamp(w, min_val, max_val)  # 截断
+            q_w = pseudo_quantize_tensor(cur_w, n_bit=n_bit, **q_config)  # 伪量化
+            cur_out = (input_feat * q_w).sum(dim=-1)  # 计算量化误差
 
             # co, 1, n_group, 1
+            # 把输入激活当成"重要性权重":
+            # 如果某个通道的激活值很小,即使量化误差大,对最终输出的影响也小;
+            # 反之激活大的位置,误差会被放大.
+            # 因此 MSE 直接在"激活×权重"的输出空间 算,而不是在权重空间算.
             err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
             del cur_w
             del cur_out
@@ -79,15 +84,11 @@ def auto_clip_layer(
 
 @torch.no_grad()
 def auto_clip_block(module, w_bit, q_config, input_feat):
-    """ 对给定模块中的线性层进行自动裁剪
-    参数:
-        module: 神经网络模型
-        w_bit: 量化的比特数
-        q_config: 量化配置
-        input_feat: 输入特征
-
-    返回:
-        clip_list: 每个线性层的名称和对应的最佳最大值.
+    """对给定模块中的线性层进行自动裁剪
+        权重里常有 1% 左右的"离群大值",直接按全域 [-w_max, w_max]
+    量化会把格子浪费在尾巴上,导致大部分权重精度下降.
+    先选一个更紧的阈值 max_val < w_max,把尾巴砍掉,
+    再量化,就能把有效格子留给主体分布, 进而减少MSE.
     """
     named_linears = {
         name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)
@@ -108,7 +109,7 @@ def auto_clip_block(module, w_bit, q_config, input_feat):
 
 @torch.no_grad()
 def apply_clip(module, clip_list):
-    """ 裁剪操作
+    """裁剪操作
     参数:
         module: 神经网络模块
         clip_list: 裁剪列表, 包含每个线性层的名称和限制最大值

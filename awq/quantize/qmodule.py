@@ -98,7 +98,6 @@ class WQLinear(nn.Module):
         super().__init__()
 
         if w_bit not in [4]:
-            # 是不是一个可以研究的点, 4bit有利于打包可能是
             raise NotImplementedError("Only 4-bit are supported for now.")
 
         self.in_features = in_features
@@ -216,7 +215,9 @@ class WQLinear(nn.Module):
         scaled_zeros[:, : scales.shape[1]] = -(
             qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
         ).to(torch.float16)
-        awq_linear.scaled_zeros = scaled_zeros.transpose(1, 0).contiguous()  # 将反量化公式中的乘法提前计算
+        awq_linear.scaled_zeros = scaled_zeros.transpose(
+            1, 0
+        ).contiguous()  # 将反量化公式中的乘法提前计算
 
         return awq_linear
 
