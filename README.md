@@ -10,3 +10,6 @@ python -m awq.entry --model_path facebook/opt-125m --w_bit 4 --q_group_size 128 
 
 ## 加载并评估真实量化模型，使用AWQ提供的内核
 python -m awq.entry --model_path facebook/opt-125m --task wikitext --w_bit 4 --q_group_size 128 --load_quant ./quant_cache/opt-125m-w4-g128-awq-v2.pt
+
+# 源项目地址
+[awq](https://github.com/mit-han-lab/llm-awq)

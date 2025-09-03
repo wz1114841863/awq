@@ -9,8 +9,9 @@ from typing import List
 from transformers.models.bloom.modeling_bloom import BloomForCausalLM
 from transformers.models.opt.modeling_opt import OPTForCausalLM
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
-from tinychat.models import LlavaLlamaForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+
+# from tinychat.models import LlavaLlamaForCausalLM
 
 from .auto_scale import auto_scale_block, apply_scale
 from .auto_clip import auto_clip_block, apply_clip
@@ -53,9 +54,9 @@ def move_embed(model, device):
     if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.rotary_emb = model.model.rotary_emb.to(device)
-    elif isinstance(model, LlavaLlamaForCausalLM):
-        model.model.embed_tokens = model.model.embed_tokens.to(device)
-        model.model.vision_tower.vision_tower.vision_model.embeddings.to(device)
+    # elif isinstance(model, LlavaLlamaForCausalLM):
+    #     model.model.embed_tokens = model.model.embed_tokens.to(device)
+    #     model.model.vision_tower.vision_tower.vision_model.embeddings.to(device)
     elif isinstance(model, OPTForCausalLM):
         model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(device)
         model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(
@@ -205,7 +206,7 @@ def run_awq(
             scales_list = auto_scale_block(
                 layer,  # 每一个decoder层
                 layer_kwargs,  # mask, position_id等属性
-                w_bit=w_bit, # 权重量化位数
+                w_bit=w_bit,  # 权重量化位数
                 q_config=q_config,  # 量化配置
                 input_feat=input_feat,  # 输入特征, 即输入到线性层的激活值
             )

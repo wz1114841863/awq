@@ -10,6 +10,7 @@ import torch
 import argparse
 import os
 import json
+import tqdm
 
 #  Hugging Face 提供用于简化多设备(CPU/GPU/TPU)和分布式训练的库.
 from accelerate import (
@@ -19,6 +20,11 @@ from accelerate import (
     load_checkpoint_in_model,  # 加载模型的权重检查到模型中,支持分布式或部分加载.
 )
 from accelerate.utils.modeling import get_balanced_memory
+
+# datasets 库是Hugging Face提供的一个用于高效处理和使用各种数据集的工具包.
+from datasets import load_dataset
+from torch import nn
+
 from awq.utils.parallel import auto_parallel
 from awq.quantize.pre_quant import run_awq, apply_awq
 from awq.quantize.quantizer import (
@@ -27,11 +33,6 @@ from awq.quantize.quantizer import (
 )
 from awq.utils.lm_eval_adaptor import LMEvalAdaptor
 from awq.utils.utils import simple_dispatch_model
-
-# datasets 库是Hugging Face提供的一个用于高效处理和使用各种数据集的工具包.
-from datasets import load_dataset
-from torch import nn
-import tqdm
 
 
 """

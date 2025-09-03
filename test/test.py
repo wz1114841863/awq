@@ -2,9 +2,10 @@ import gc
 import torch
 import torch.nn as nn
 
+
 @torch.no_grad()
 def get_weight_scale(weight, q_group_size=-1):
-    """ 计算权重缩放因子 """
+    """计算权重缩放因子"""
     org_shape = weight.shape
     if q_group_size > 0:
         weight = weight.view(-1, q_group_size)  # [n_group, q_group_size]

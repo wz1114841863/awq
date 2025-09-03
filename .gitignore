@@ -5,3 +5,6 @@ awq.egg-info/
 quant_cache/
 facebook/*
 datasets/
+
+**/__pycache__/
+*.pyc
